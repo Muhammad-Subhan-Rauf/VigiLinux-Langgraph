@@ -1,10 +1,8 @@
-import subprocess
-import os
+stri = "echo /home/rauf > index.js"
 
+parts = stri.split()  # Split into list
+parts[-1] = "home/" + parts[-1]  # Modify the last element
 
-shell_command = ["echo", "'RAsubdiouasbdoliujbadzsliohkuyfjbsxdcfkluijh' > /home/subhan-rauf/Desktop/subhan/rauf/sohail/texting.txt"]
-result = subprocess.run("echo 'RAsubdiouasbdoliujbadzsliohkuyfjbsxdcfkluijh' > /home/subhan-rauf/Desktop/subhan/rauf/sohail/texting.txt", capture_output=True, text=True, shell=True)
-print(result)
+stri = " ".join(parts)  # Join back into a string
 
-
-
+print(stri)

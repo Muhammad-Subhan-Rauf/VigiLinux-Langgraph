@@ -6,7 +6,11 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import Graph, END, START
 import ipAddress as ipComms
 import os
-from commands import ubuntu_commands 
+from commands import ubuntu_commands
+
+from langchain_groq import ChatGroq
+
+commands_with_paths = ["echo", "cd", "ls", "cp", "mv", "rm", "rmdir", "mkdir", "touch", "find", "locate", "pwd", "basename", "dirname", "tar", "zip", "unzip", "gzip", "gunzip", "ln", "stat", "file", "chmod", "chown", "chgrp", "cat", "tac", "more", "less", "head", "tail", "diff", "cmp", "grep", "sed", "awk", "tee", "scp", "rsync", "df", "du", "mount", "umount", "export", "source"]
 
 present_path = "/"
 command_template = """Convert the following user request into a shell command, or reply 'Unsupported Command' if it cannot be executed. Split the command into multiple
@@ -17,8 +21,27 @@ command_template = """Convert the following user request into a shell command, o
         Shell Command:"""
 # Configure Gemini API Key
 google_api = os.getenv("GOOGLE_API_KEY")
+groq_api = os.getenv("GROQ_API_KEY")
 
-llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=google_api, verbose= False)
+
+
+
+def change_dir(new_path):
+    global present_path
+    if os.path.isabs(new_path):
+        present_path = new_path
+
+    else:
+        present_path = present_path +"/" + new_path
+
+    print("\n\n\nUPDATED PATH: ",present_path)
+# llm =ChatGroq(
+#     model_name="llama-3.3-70B-versatile",
+#     temperature=1,
+#     groq_api_key=groq_api
+# )
+
+llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=google_api, verbose= False, temperature=0)
 
 # Define State
 class AgentState:
@@ -36,11 +59,24 @@ def classify_input(state: AgentState) -> AgentState:
     # print(f"Input received: {state.user_input}")
     prompt_template = PromptTemplate(
         input_variables=["input"],
-        template="""
-        Is the user asking you to run a linux command line command if yes then return "command" else return "chat":
-        Input: {input}
-        Output (only 'command' or 'chat'):
-        """
+template="""
+Classify whether the user's request can be accomplished through Linux command line operations.
+Consider these as 'command' (even if implicit):
+- File/directory operations
+- System administration/configuration
+- Package management
+- Process/network management
+- Text manipulation
+- Hardware operations
+- Automation/scripting tasks
+- Permission/account management
+- Any action requiring terminal execution
+
+For general knowledge, conversations, or non-Linux topics, classify as 'chat'.
+
+Input: {input}
+Output (only 'command' or 'chat'):
+"""
     )
     chain = prompt_template | llm
     result = chain.invoke({"input": state.user_input})
@@ -89,12 +125,33 @@ def interpret_command(state: AgentState) -> AgentState:
         """
     )
     chain = prompt_template | llm
-    result = chain.invoke({"input": state.user_input})
-    if result.content.strip().lower() != "unsupported command":
 
-        state.shell_command = result.content.strip()
-        print(f"Generated Shell Command: {state.shell_command}")
-    return state
+    max_retries = 2  # Set a maximum number of retries
+    attempts = 0
+
+    while attempts <= max_retries:
+        result = chain.invoke({"input": state.user_input})
+        print(result)
+        command_output = result.content.strip()
+
+        if command_output:  # Check if the command is not empty
+            if command_output.lower() != "unsupported command":
+                state.shell_command = command_output
+                print(f"Generated Shell Command: {state.shell_command}")
+                return state # Command found, return state
+            else:
+                state.shell_command = "Unsupported Command"
+                print(f"Generated Shell Command: {state.shell_command}")
+                return state # Unsupported command, return state
+        else:
+            attempts += 1
+            print(f"Empty command received from LLM. Regenerating... (Attempt {attempts}/{max_retries + 1})")
+
+    state.shell_command = None  # Set shell_command to None if no command after retries
+    state.response = "Sorry, I couldn't generate a valid command after multiple attempts." # Inform user about failure
+    print(state.response)
+    return state # Return state with no command
+
 
 # **NEW STEP: Check if Command is Network Related**
 def check_network_command(state: AgentState) -> AgentState:
@@ -102,7 +159,7 @@ def check_network_command(state: AgentState) -> AgentState:
     if state.shell_command:
         command = state.shell_command.replace("Shell Command: ","")
         if any(cmd in command.lower().split() for cmd in network_commands):
-        
+
             print("Network Command Detected")
 
             state.execution_result = ipComms.get_network_ip_addresses()[0]
@@ -124,7 +181,7 @@ def install_missing_packages(command):
         # Check if command exists
         if command_lst[0] == "cd" or command_lst[0] in ubuntu_commands:
             return True
-        
+
         out = subprocess.run(command_lst, capture_output=True, text=True)
 
         # print("\n\n\nOutput:", out.stdout)  # Standard output
@@ -136,17 +193,30 @@ def install_missing_packages(command):
         # print(f"Dependency missing for: {command.split()[0]}")
         # print(f"Installing {command.split()[0]}...")
         subprocess.run(f"brew install {command.split()[0]}", shell=True, check=True)
-    
+
     except Exception as e:
         print(f"unexpected error occured: {e}\n\n")
+
+def remove_before_double_slash(path: str) -> str:
+    # Find the position of the double slash
+    double_slash_index = path.find("//")
+
+    # If found, return everything after it, otherwise return the original path
+    return path[double_slash_index + 2:] if double_slash_index != -1 else path
+
 
 # Step 5: Execute Shell Command
 def execute_command(state: AgentState) -> AgentState:
     shell_command = state.shell_command
-    
+    global present_path
+
+    if shell_command is None: # Handle the case where interpret_command returns None
+        state.execution_result = "Unable to generate a valid command."
+        return state
+
     # Remove the "Shell Command: " prefix
     shell_command = shell_command.replace("Shell Command: ", "")
-    
+
     # Handle unsupported commands
     if "Unsupported Command" in shell_command:
         state.execution_result = "Command not supported or cannot be executed."
@@ -160,16 +230,17 @@ def execute_command(state: AgentState) -> AgentState:
 
         # Split by ';' and strip spaces around each command
         commands = [shell_command]
-        if ";" in shell_command:
-            commands = [cmd.strip() for cmd in shell_command.split(";") if cmd.strip()]
+        # if ";" in shell_command:
+        #     commands = [cmd.strip() for cmd in shell_command.split(";") if cmd.strip()]
         if "&&" in shell_command:
             commands = [cmd.strip() for cmd in shell_command.split("&&") if cmd.strip()]
 
         all_results = []
-        
+
         for cmd in commands:
             print(f"Executing Sub-Command: {cmd}")
-            cmd = cmd.replace("/home","~")
+            # cmd = cmd.replace("/home","~")
+            cmd = cmd.replace("~/user","~")
             # Preprocess the shell command
             cmd = os.path.expanduser(cmd)
             cmd = os.path.expandvars(cmd)
@@ -179,13 +250,68 @@ def execute_command(state: AgentState) -> AgentState:
             print("THIS LIST: ",shell_command_list)
             shell_command_list[-1] = os.path.expanduser(shell_command_list[-1])
             symbols = ['|', '>', '<', '&&', '||', '$(', '`']
+
             if shell_command_list[0] == "echo" or any(symbol in shell_command_list for symbol in symbols):
                 shell_bool = True
                 shell_command_list = " ".join(shell_command_list)
                 shell_command_list = shell_command_list.replace(">>",">")
             print(f"Processed Sub-Command: {shell_command_list}")
+            if shell_command_list[0] == "cd":
+                change_dir(shell_command_list[1])
+                print("PRESENT PATH: ",present_path)
+                continue
+            is_abs_path = os.path.isabs(shell_command_list[1])
+            if shell_command_list[0] in commands_with_paths and not is_abs_path:
+                if present_path.endswith("/") and len(present_path) > 1:
+                    present_path = present_path.rstrip("/")
 
-            # Execute the command
+                new_path = shell_command_list[-1]
+
+                # Extract the last directory of the present path
+                last_dir_present = os.path.basename(present_path)
+                first_dir_new = os.path.basename(new_path.split("/")[0]) if "/" in new_path else new_path
+
+                # Avoid duplicating the directory name
+                if last_dir_present == first_dir_new:
+                    shell_command_list[-1] = present_path + new_path[len(first_dir_new):]
+                else:
+                    shell_command_list[-1] = present_path + "/" + new_path
+
+            elif isinstance(shell_command_list, str) :
+                print("\n\n\n\nis instance TRUE")
+                print(f"||{shell_command_list.split()[0]}||")
+                if shell_command_list.split()[0] in commands_with_paths:
+                    print("\n\nSPLIT ALSO TRUE")
+                    if shell_bool:
+                        print("\n\nSHELL BOOL TRUE")
+
+                        if present_path.endswith("/") and len(present_path) > 1:
+                            present_path = present_path.rstrip("/")
+
+                        parts = shell_command_list.split()
+                        new_path = parts[-1]
+
+                        last_dir_present = os.path.basename(present_path)
+                        first_dir_new = os.path.basename(new_path.split("/")[0]) if "/" in new_path else new_path
+
+                        if last_dir_present == first_dir_new:
+                            parts[-1] = present_path + new_path[len(first_dir_new):]
+                        else:
+                            parts[-1] = present_path + "/" + new_path
+                        print(f"\n\n\n\n\n\n\nPARTS:   {parts}\n\n\n\n\n\n\n\n\n")
+                        shell_command_list = " ".join(parts)
+                        shell_command_list = remove_before_double_slash(shell_command_list)
+                        print(f"\n\n\nREMMED PATH: {shell_command_list}\n\n\n")
+
+
+                # shell_command_list[-1] = present_path + "/" +shell_command_list[-1]
+
+
+
+            # Execute the
+            print("CURRENT PATH IS: ",present_path)
+            print("THE PATH IS ABSOLUTE T/F:",is_abs_path)
+            print("WE ARE RUNNING: ",shell_command_list)
             result = subprocess.run(shell_command_list, capture_output=True, shell=shell_bool)
             print(result)
 
@@ -231,6 +357,7 @@ def error_management(state: AgentState) -> AgentState:
 
         state.shell_command = result.content.strip()
         print(f"Generated Shell Command: {state.shell_command}")
+    state.shell_command = result
     state.error = None
     return state
 
@@ -272,7 +399,7 @@ def create_agent_graph():
         "execute_command",
         lambda state: "generate_command_response" if not state.error else "error_management"
     )
-    graph.add_edge("error_management", "execute_command") 
+    graph.add_edge("error_management", "execute_command")
     graph.add_edge("generate_command_response", END)
     return graph
 
@@ -284,7 +411,8 @@ def main():
 
     while True:
         try:
-            user_input = f"The current working directory is {present_path} " + input("You: ")
+            print("CURRENT DIRECTORY:", present_path)
+            user_input = f"The current working directory is {present_path}. user asked: " + input("You: ")
             state = AgentState(user_input=user_input)
             print("THIS STATE", state.execution_result)
             result = app.invoke(state)
